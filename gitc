@@ -1,0 +1,162 @@
+gitc() { git commit -m "$*" --no-verify && git push; }
+
+alias diffc='git diff --staged | pbcopy'
+
+# Shared MR prompt template
+get_mr_prompt_template() {
+  cat <<'EOF'
+# MR Title and Description Generation Prompt
+
+Make a short and clear branch name, merge request (MR) title, and description from a diff file. Save them to mr-prompt.md in the current project root.
+
+---
+
+**Instructions:**
+
+Look at the diff file and write a merge request title and description using these steps:
+
+**Title Requirements:**
+- Keep it short but clear (under 80 characters)
+- Start with an action word (Fix, Update, Refactor, Add, Remove, etc.)
+- Clearly state the main change or improvement
+- Skip technical terms unless needed
+
+**Description Requirements:**
+- Begin with a simple summary of what changed
+- List which parts, files, or systems you changed
+- Say why you made these changes (bugs fixed, improvements, etc.)
+- Point out how this helps users, makes the code easier to work with, or makes things run better
+- If you removed or replaced a complex system, explain how the complexity was a problem
+- Use good grammar and spelling
+- Give enough detail but do not ramble
+
+**Structure Template:**
+
+**MR Title:** [Action] [What] [Context if needed]
+
+**MR Description:**
+This merge request [summary of main changes]. [Technical details about what was changed].
+
+[If needed: Also, this refactors, removes, or replaces [system/component] because [reason - explain if complexity was a problem].]
+
+The result is [user improvements] and [technical or maintainability improvements].
+
+**Example Quality Indicators:**
+- Technical team members know exactly what changed
+- Business team members see the value
+- Future developers can quickly see what and why
+- Grammar and spelling are correct
+- Mixes technical detail with easy reading
+
+Now look at the diff and write:
+1.  MR title
+2.  MR description
+3.  Branch name (short and clear)
+
+Afterward, rewrite it using the style rules and save it to mr-prompt.md in the project root.
+Then tell the user that details are saved to mr-prompt.md.
+
+**Writing Style (Apply to Both Title and Description):**
+After you thought about the title and description, apply the following writing style to refine them:
+```
+EOF
+  echo "$(human --return)"
+  cat <<'EOF'
+```
+
+---
+
+**Git Diff to Analyze:**
+
+EOF
+}
+
+mrprompt() {
+    # Check if pbcopy is available (macOS-specific)
+    if ! command -v pbcopy >/dev/null 2>&1; then
+        echo "Error: pbcopy not found. This command is macOS-specific."
+        return 1
+    fi
+
+    # Check if we're in a git repository
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "Error: Not in a git repository."
+        return 1
+    fi
+
+    # Get the staged diff
+    local staged_diff=$(git diff --staged)
+
+    # Check if there are any staged changes
+    if [ -z "$staged_diff" ]; then
+        echo "Error: No staged changes found. Stage your changes with 'git add' first."
+        return 1
+    fi
+
+    # Combine prompt and diff, then copy to clipboard
+    {
+        get_mr_prompt_template
+        echo '```diff'
+        echo "$staged_diff"
+        echo '```'
+    } | pbcopy && echo "Prompt and staged diff copied to clipboard!" || echo "Error: Failed to copy to clipboard."
+}
+
+mrbranch() {
+    # Get the target branch (default to "main" if not provided)
+    local target_branch="${1:-main}"
+
+    # Check if pbcopy is available (macOS-specific)
+    if ! command -v pbcopy >/dev/null 2>&1; then
+        echo "Error: pbcopy not found. This command is macOS-specific."
+        return 1
+    fi
+
+    # Check if we're in a git repository
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "Error: Not in a git repository."
+        return 1
+    fi
+
+    # Check if the target branch exists
+    if ! git rev-parse --verify "$target_branch" >/dev/null 2>&1; then
+        echo "Error: Target branch '$target_branch' does not exist."
+        return 1
+    fi
+
+    # Get the current branch name
+    local current_branch=$(git rev-parse --abbrev-ref HEAD)
+
+    # Check if we're on the target branch
+    if [ "$current_branch" = "$target_branch" ]; then
+        echo "Error: You are already on the '$target_branch' branch."
+        return 1
+    fi
+
+    # Get the diff between target branch and current HEAD
+    local branch_diff=$(git diff "$target_branch"..HEAD)
+
+    # Check if there are any differences
+    if [ -z "$branch_diff" ]; then
+        echo "Error: No differences found between '$current_branch' and '$target_branch'."
+        return 1
+    fi
+
+    # Display what we're comparing
+    echo "Comparing '$current_branch' against '$target_branch'..."
+
+    # Combine prompt and diff, then copy to clipboard
+    {
+        get_mr_prompt_template
+        echo "**Branch Comparison:** $current_branch → $target_branch"
+        echo
+        echo '```diff'
+        echo "$branch_diff"
+        echo '```'
+    } | pbcopy && echo "Prompt and branch diff copied to clipboard!" || echo "Error: Failed to copy to clipboard."
+}
+
+# Usage examples:
+# mrbranch          # Compare current branch against main
+# mrbranch dev      # Compare current branch against dev
+# mrbranch master   # Compare current branch against master
