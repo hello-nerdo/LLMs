@@ -1,161 +1,93 @@
 # Rules for Robust Software
 
-_Principles for building maintainable applications across languages_
+> Choose `simple` over `easy`.
 
-**Simplicity Over Cleverness**. **Simple** means one responsibility, one concept, one clear purpose. **Easy** means familiar, convenient or comfortable. These are completely different concepts. Always choose simple over easy when building systems you'll maintain long-term.
+Writing simple code can be harder up front, but it's much easier to maintain, understand, and extend over time.
+
+- `Simple` means every piece of code has a single, clear purpose and does one thing well.
+- `Easy` only means something feels familiar or comfortable.
+
+`Easy` depends on your skill level and experience. `Simple` is an attribute of your code.
+
+Try to consider the next developer who will read or maintain your code. What will their first impression be? What are they likely trying to accomplish? What wrong assumptions might they make?
+
+The rules below are my huerisitcs for writing code that is is `simple` but rarely is this the `easy` way.
 
 ---
 
-### Rule 1: One Decision, One Place
+### Rule 1: Data for State, Functions for Processes
 
-Don't create abstractions, indirections, or extractions until you have clear evidence they're needed.
+In order to not leave consumers guessing, we should:
 
-#### Direct is Better Than Clever
+1. Use plain data structures for state.
+2. Use functions to change that state.
 
-**Keep it inline until you see real duplication:**
+It is `easy` to let an object's methods change its internal state, but this often causes confusion and makes it hard for others to know what properties are available at any given time.
 
-```typescript
-// ✅ Good - One-off logic stays simple
-if (user?.plan === 'premium') {
-  return <PremiumFeature />;
-}
-
-// ✅ Good - Extract only when pattern emerges (3+ instances)
-// After seeing this condition in multiple places:
-const canAccessPremiumFeatures = (user: User | null) =>
-  user?.plan === 'premium' || (user?.credits ?? 0) > 5;
-```
-
-**❌ Bad - Premature event bus:**
+**Bad. Class methods add properties, so you can't be sure what is set:**
 
 ```typescript
-interface EventBus {
-  emit(event: string, data: any): void;
-  on(event: string, handler: Function): void;
-}
+class Session {
+  visitorId: string;
 
-class OrderService {
-  constructor(private eventBus: EventBus) {}
+  // These may exist or not, depending on whether login() ran
+  userId?: string;
+  accessToken?: string;
 
-  async createOrder(data: OrderData) {
-    const order = await this.saveOrder(data);
-    this.eventBus.emit('order.created', order);
+  async login(credentials: Credentials) {
+    const auth = await authenticate(credentials);
+    this.userId = auth.userId;
+    this.accessToken = auth.token;
   }
-}
 
-class EmailService {
-  constructor(private eventBus: EventBus) {
-    eventBus.on('order.created', (order) => this.sendConfirmation(order));
+  logout() {
+    this.userId = undefined;
+    this.accessToken = undefined;
+    // BUG: If someone later adds a new field (e.g., permissions, paymentMethods)
+    // and forgets to clear it here, User B inherits User A's data
   }
 }
 ```
 
-**✅ Good - Direct connection:**
+**Good. Each type clearly shows its fields:**
 
 ```typescript
-class OrderService {
-  constructor(private emailService: EmailService) {}
+type AnonymousSession = {
+  visitorId: string;
+};
 
-  async createOrder(data: OrderData) {
-    const order = await this.saveOrder(data);
-    await this.emailService.sendOrderConfirmation(order);
-    return order;
-  }
-}
+type AuthenticatedSession = {
+  visitorId: string;
+  userId: string;
+  accessToken: string;
+};
+
+const login = async (
+  session: AnonymousSession,
+  credentials: Credentials
+): Promise<AuthenticatedSession> => {
+  const auth = await authenticate(credentials);
+  return {
+    visitorId: session.visitorId,
+    userId: auth.userId,
+    accessToken: auth.token,
+  };
+};
+
+const logout = (session: AuthenticatedSession): AnonymousSession => {
+  // Only visitorId carries over—impossible to accidentally leak fields
+  return { visitorId: session.visitorId };
+};
 ```
 
-### Rule 2: Use Type-Safe Structures
+**Why?** In the bad example, `logout()` must remember to clear every authenticated field. When a developer adds a new field months later, they must also update `logout()`—and if they forget, one user's data leaks to another. In the good example, `logout()` explicitly constructs a new `AnonymousSession` with only the fields it should have. New fields added to `AuthenticatedSession` can't leak because they're never copied over.
 
-Replace branching logic with your language's type system. Let the compiler catch errors instead of runtime.
+### Rule 2: Group code by what it does instead of what it is.
 
-**❌ Bad - Error-prone conditionals:**
+Choosing the right boundaries between "services" is a constant battle. But, I have found that focusing on the `verbs` instead of the `nouns` is typically better in the long run.
+Ideally, if a business rule changes, we should update only one file / module / microservice.
 
-```typescript
-function processWebhook(payload: any) {
-  if (payload.type === 'user.created') {
-    sendWelcomeEmail(payload.data.email);
-  } else if (payload.type === 'payment.succeeded') {
-    updateUserCredits(payload.data.user_id, payload.data.amount);
-  } else if (payload.type === 'subscription.cancelled') {
-    downgradeUser(payload.data.user_id);
-  }
-  // What happens when new webhook types are added?
-}
-```
-
-**✅ Good - Type-safe exhaustive handling:**
-
-```typescript
-// Exhaustive discriminated union - compile-time safety
-type WebhookEvent =
-  | { type: 'user.created'; data: { email: string } }
-  | { type: 'payment.succeeded'; data: { user_id: string; amount: number } }
-  | { type: 'subscription.cancelled'; data: { user_id: string } };
-
-const webhookHandlers = {
-  'user.created': async (data: { email: string }) => {
-    await sendWelcomeEmail(data.email);
-  },
-  'payment.succeeded': async (data: { user_id: string; amount: number }) => {
-    await updateUserCredits(data.user_id, data.amount);
-  },
-  'subscription.cancelled': async (data: { user_id: string }) => {
-    await downgradeUser(data.user_id);
-  },
-} as const;
-
-async function processWebhook(payload: WebhookEvent) {
-  const handler = webhookHandlers[payload.type];
-  await handler(payload.data); // TypeScript ensures all cases handled
-}
-```
-
-### Rule 3: Validate at Boundaries, Trust Internally
-
-Check external data rigorously. Trust internal types completely. Never mix the two approaches.
-
-**❌ Bad - Defensive programming everywhere:**
-
-```typescript
-function calculateTotal(items: CartItem[] | null | undefined) {
-  if (!items || !Array.isArray(items)) return 0;
-
-  return items.reduce((sum, item) => {
-    if (!item || typeof item.price !== 'number') return sum;
-    if (!item.quantity || typeof item.quantity !== 'number') return sum;
-    return sum + item.price * item.quantity;
-  }, 0);
-}
-```
-
-**✅ Good - Validate once at the boundary:**
-
-```typescript
-// Validate external data
-import { z } from 'zod';
-
-const CartItemSchema = z.object({
-  price: z.number().positive(),
-  quantity: z.number().int().positive(),
-});
-
-async function fetchCart(): Promise<CartItem[]> {
-  const response = await fetch('/api/cart');
-  const data = await response.json();
-  return z.array(CartItemSchema).parse(data); // Runtime validation
-}
-
-// Trust internal types
-function calculateTotal(items: CartItem[]) {
-  return items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-}
-```
-
-### Rule 4: Build for Change
-
-Group code by what it does, not what it is. Changes to business logic should affect one module, not many.
-
-**❌ Bad - Organized by domain model:**
+**Bad. Grouped by domain model:**
 
 ```typescript
 class Order {
@@ -181,10 +113,10 @@ class Order {
 }
 ```
 
-**✅ Good - Organized by feature:**
+**Good. Grouped by what they do:**
 
 ```typescript
-// Each system handles its own concern
+// Each part handles one job
 class TaxCalculator {
   calculate(items: OrderItem[], state: string): TaxBreakdown {
     const subtotal = items.reduce((sum, item) => sum + item.total, 0);
@@ -207,76 +139,153 @@ class PaymentValidator {
 }
 ```
 
-**Why?** When tax laws change, you modify the TaxCalculator. When payment rules change, you modify the PaymentValidator. A single business rule change affects one module, not many scattered classes.
+**Why?** When tax rules change, we can edit only TaxCalculator. When payment rules change, we can edit only PaymentValidator.
 
-### Rule 5: Data for State, Classes for Processes
+### Rule 3: Repetition is okay, but not encouraged
 
-Use plain data structures for information that moves through your system. Reserve classes for multi-step operations that orchestrate that data.
+Do not create abstractions, extra layers, or move code out until you are certain they are needed.
+Premature abstractions tend to stay bad and get worse over time.
+Coupling transformations / functions too early makes it harder to find the correct boundaries between systems.
 
-**❌ Bad - Mixing data and behavior:**
+> Write things inline until you run into 3+ instances of the same pattern.
+
+**Bad. Abstracted too early, became a junk drawer:**
 
 ```typescript
-class BlogPost {
-  private id: string;
-  private title: string;
-  private content: string;
-  private publishedAt: Date | null;
+// Started simple: format a user's name
+const formatUserName = (user: User) => `${user.firstName} ${user.lastName}`;
 
-  publish() {
-    this.publishedAt = new Date();
-    Database.save(this);
-    EmailService.notifySubscribers(this);
-  }
-
-  getWordCount() {
-    return this.content.split(' ').length;
-  }
-}
+// Then someone needed "Last, First" for a table...
+// Then someone needed a fallback for missing names...
+// Then someone needed a title prefix for formal contexts...
+// Now you have this:
+const formatUserName = (
+  user: User,
+  options: {
+    lastFirst?: boolean;
+    fallback?: string;
+    includeTitle?: boolean;
+    maxLength?: number;
+  } = {}
+) => {
+  if (!user.firstName) return options.fallback ?? 'Anonymous';
+  const title = options.includeTitle ? `${user.title} ` : '';
+  const name = options.lastFirst
+    ? `${user.lastName}, ${user.firstName}`
+    : `${user.firstName} ${user.lastName}`;
+  const full = `${title}${name}`;
+  return options.maxLength ? full.slice(0, options.maxLength) : full;
+};
 ```
 
-**✅ Good - Separate data from processes:**
+Every new case added a flag instead of questioning whether this should be one function at all. Now it's a branching mess that no one wants to touch.
+
+**Good. Inline until the real pattern emerges:**
 
 ```typescript
-// Plain data
-type BlogPost = {
-  id: string;
-  title: string;
-  content: string;
-  publishedAt: Date | null;
+// Table component - needs "Last, First"
+<td>{`${user.lastName}, ${user.firstName}`}</td>
+
+// Avatar component - needs fallback
+<span>{user.firstName ?? 'Anonymous'}</span>
+
+// Formal letter - needs title
+<p>{`${user.title} ${user.firstName} ${user.lastName}`}</p>
+
+// After seeing the REAL patterns, you might extract:
+const formatNameForTable = (user: User) =>
+  `${user.lastName}, ${user.firstName}`;
+
+// Or you might realize: these share almost nothing.
+// No abstraction needed.
+```
+
+**Why?** Waiting reveals whether the cases are truly similar or just superficially alike.
+
+### Rule 4: Use Type-Safe Structures
+
+Let your language's type system handle branching. The compiler should stop errors before your code runs.
+
+**Bad. Optional fields force runtime guessing:**
+
+```typescript
+type ApiResponse = {
+  success: boolean;
+  data?: User;
+  error?: string;
 };
 
-// Pure functions for calculations
-const getPostMetrics = (post: BlogPost) => ({
-  wordCount: post.content.split(' ').length,
-  readingTime: Math.ceil(post.content.split(' ').length / 200),
-});
-
-// Class for complex process
-class PublishingPipeline {
-  constructor(
-    private validator: ContentValidator,
-    private storage: Storage,
-    private notifier: Notifier
-  ) {}
-
-  async publish(post: BlogPost): Promise<BlogPost> {
-    await this.validator.validate(post);
-    const published = { ...post, publishedAt: new Date() };
-    await this.storage.save(published);
-    await this.notifier.notifySubscribers(post.authorId);
-    return published;
+function handleResponse(res: ApiResponse) {
+  if (res.success) {
+    console.log(res.data.name); // BUG: data might be undefined
+  } else {
+    console.log(res.error); // BUG: error might be undefined
   }
+}
+
+// Nothing stops you from creating invalid states:
+const broken: ApiResponse = { success: true, error: 'wat' };
+const alsoBroken: ApiResponse = { success: false }; // no error message
+```
+
+**Good. Discriminated union makes invalid states unrepresentable:**
+
+```typescript
+type ApiResponse = { success: true; data: User } | { success: false; error: string };
+
+function handleResponse(res: ApiResponse) {
+  if (res.success) {
+    console.log(res.data.name); // Guaranteed to exist
+  } else {
+    console.log(res.error); // Guaranteed to exist
+  }
+}
+
+// Invalid states are now compile errors:
+const broken: ApiResponse = { success: true, error: 'wat' }; // ✗ Error
+const alsoBroken: ApiResponse = { success: false }; // ✗ Error
+```
+
+**Why?** In the bad example, `success: true` doesn't guarantee `data` exists—you're trusting convention, not the compiler. In the good example, TypeScript knows that when `success` is `true`, `data` must exist. The type system enforces correctness, so bugs are caught at compile time instead of production.
+
+### Rule 5: Validate at Boundaries, Trust Internally
+
+Validate incoming data right away. Inside of functions / modules / services, trust your types.
+
+**Bad. Defensive programming everywhere:**
+
+```typescript
+function calculateTotal(items: CartItem[] | null | undefined) {
+  if (!items || !Array.isArray(items)) return 0;
+
+  return items.reduce((sum, item) => {
+    if (!item || typeof item.price !== 'number') return sum;
+    if (!item.quantity || typeof item.quantity !== 'number') return sum;
+    return sum + item.price * item.quantity;
+  }, 0);
 }
 ```
 
----
+**Good. Validate once at the edge:**
 
-## Quick Reference
+```typescript
+// Validate data coming in
+import { z } from 'zod';
 
-1. **One Decision, One Place** - Wait for patterns, avoid premature abstraction
-2. **Use Type-Safe Structures** - Let the compiler catch errors at compile time
-3. **Validate at Boundaries** - Check external input once, trust internal data
-4. **Build for Change** - Code that changes together lives together
-5. **Data for State, Classes for Processes** - Separate data from behavior
+const CartItemSchema = z.object({
+  price: z.number().positive(),
+  quantity: z.number().int().positive(),
+});
 
-Remember: **Profile before optimizing**. These patterns prevent common problems, but always measure your specific use case.
+async function fetchCart(): Promise<CartItem[]> {
+  const response = await fetch('/api/cart');
+  const data = await response.json();
+  return z.array(CartItemSchema).parse(data); // Runtime validation
+}
+
+// Trust the types inside your app
+function calculateTotal(items: CartItem[]) {
+  return items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+}
+```
+Ï
