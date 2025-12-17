@@ -11,7 +11,7 @@ Writing simple code can be harder up front, but it's much easier to maintain, un
 
 Try to consider the next developer who will read or maintain your code. What will their first impression be? What are they likely trying to accomplish? What wrong assumptions might they make?
 
-The rules below are my huerisitcs for writing code that is is `simple` but rarely is this the `easy` way.
+The rules below are my heuristics for writing code that is is `simple` but rarely is this the `easy` way.
 
 ---
 
